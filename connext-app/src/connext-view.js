@@ -1,4 +1,5 @@
 import React, { Component }  from 'react'
+import { Button, CircularProgress, Grid, InputAdornment, Modal, TextField, Tooltip, Typography, withStyles, } from "@material-ui/core"
 import * as connext from "@connext/client"
 import { Contract, ethers as eth } from "ethers"
 //import { Currency, store, toBN } from "./utils"
@@ -10,11 +11,33 @@ import tokenArtifacts from "openzeppelin-solidity/build/contracts/ERC20Mintable.
 import { AddressZero, Zero } from "ethers/constants"
 import { formatEther, parseEther } from "ethers/utils"
 
+
 // Optional URL overrides for custom urls
 const overrides = {
   nodeUrl: 'wss://rinkeby.indra.connext.network/api/messaging',
   ethUrl: 'https://rinkeby.indra.connext.network/api/ethprovider',
 };
+
+const styles = theme => ({
+  icon: {
+    width: "40px",
+    height: "40px"
+  },
+  button: {
+    backgroundColor: "#FCA311",
+    color: "#FFF"
+  },
+  modal: {
+    position: "absolute",
+    top: "-400px",
+    left: "150px",
+    width: theme.spacing(50),
+    backgroundColor: theme.palette.background.paper,
+    boxShadow: theme.shadows[5],
+    padding: theme.spacing(4),
+    outline: "none"
+  }
+});
 
 // Constants for channel max/min - this is also enforced on the hub
 const WITHDRAW_ESTIMATED_GAS = toBN("300000");
@@ -23,7 +46,7 @@ const HUB_EXCHANGE_CEILING = parseEther("69"); // 69 token
 const CHANNEL_DEPOSIT_MAX = parseEther("30"); // 30 token
 
 
-export default class ConnextView extends Component {
+class ConnextView extends Component {
 	constructor(props) {
 		super(props)
 
@@ -44,6 +67,12 @@ export default class ConnextView extends Component {
 			swapRate,
 			token: null,
 			xpub: "",
+
+			recipient: {
+				display: "",
+				value: undefined,
+				error: undefined,
+			}
 		}
 	}
 
@@ -238,8 +267,57 @@ export default class ConnextView extends Component {
 		this.setState({ pending: { ...pending, closed: true } });
 	}
 
+	// ************************************************* //
+	//                    withdraw                        //
+	// ************************************************* //
+	async withdrawalHandler(withdrawEth) {
+		const { balance, channel } = this.state
+		const recipient = this.state.recipient.value
+		console.log(">> recipient: ", recipient)
+		if (!recipient) return
+
+		const amount = parseEther(balance.channel.ether.toETH().amount)
+		if (amount.lte(Zero)) return
+		console.log(">> amount: ", amount.toString())
+
+		this.setPending({ type: "withdrawal", complete: false, closed: false })
+		this.setState({ withdrawing: true });
+		const result = await channel.withdraw({ amount: amount.toString(), recipient });
+		this.setState({ withdrawing: false })
+
+		this.setPending({ type: "withdrawal", complete: true, closed: false })
+		// console.log(`Cashout result: ${JSON.stringify(result)}`)
+		//history.push("/")
+	}
+
+	async updateRecipientHandler(value) {
+		let recipient = value
+		let error
+
+		// if (value.includes("ethereum:")) {
+		// 	recipient = value.split(":")[1]
+		// }
+		//
+		// if (recipient === "") {
+		// 	error = "Please provide an address"
+		// } else if (!isHexString(recipient)) {
+		// 	error = `Invalid hex string: ${recipient}`
+		// } else if (arrayify(recipient).length !== 20) {
+		// 	error = `Invalid length: ${recipient}`
+		// }
+
+		this.setState({
+			recipient: {
+				display: value,
+				value: error ? undefined : recipient,
+				error,
+			},
+			scan: false
+		});
+	}
 
 	render() {
+		const { classes } = this.props
 		const {
 			address,
 			balance,
@@ -250,6 +328,7 @@ export default class ConnextView extends Component {
 			pending,
 			sendScanArgs,
 			xpub,
+			recipient,
 		} = this.state;
 
 		const minEth = minDeposit ? minDeposit.toETH().format() : '?.??'
@@ -266,6 +345,29 @@ export default class ConnextView extends Component {
 			<br/>
 			<div>{ depositTo }</div>
 			<div>{ depositMaxMin }</div>
+			<div> withdraw </div>
+			<TextField
+				style={{ width: "100%" }}
+				id="outlined-with-placeholder"
+				label="Address"
+				placeholder="0x0..."
+				value={recipient.display || ""}
+				onChange={evt => this.updateRecipientHandler(evt.target.value)}
+				margin="normal"
+				variant="outlined"
+				required
+				helperText={recipient.error}
+				error={!!recipient.error}
+			/>
+			<Button
+				className={classes.button}
+				fullWidth
+				onClick={() => this.withdrawalHandler(true)}
+				disabled={!recipient.value}
+			>
+			Cash Out Eth
+			</Button>
 		</div>
 	}
 }
+export default withStyles(styles)(ConnextView);
