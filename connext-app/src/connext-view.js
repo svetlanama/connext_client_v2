@@ -4,6 +4,8 @@ import { Contract, ethers as eth } from "ethers"
 //import { Currency, store, toBN } from "./utils"
 import { Currency } from './utils/currency'
 import { store } from './utils/store'
+import { toBN } from './utils/bn'
+import interval from "interval-promise"; // TODO: don not install and replace to setInterval
 import tokenArtifacts from "openzeppelin-solidity/build/contracts/ERC20Mintable.json"
 import { AddressZero, Zero } from "ethers/constants"
 import { formatEther, parseEther } from "ethers/utils"
@@ -13,6 +15,13 @@ const overrides = {
   nodeUrl: 'wss://rinkeby.indra.connext.network/api/messaging',
   ethUrl: 'https://rinkeby.indra.connext.network/api/ethprovider',
 };
+
+// Constants for channel max/min - this is also enforced on the hub
+const WITHDRAW_ESTIMATED_GAS = toBN("300000");
+const DEPOSIT_ESTIMATED_GAS = toBN("25000");
+const HUB_EXCHANGE_CEILING = parseEther("69"); // 69 token
+const CHANNEL_DEPOSIT_MAX = parseEther("30"); // 30 token
+
 
 export default class ConnextView extends Component {
 	constructor(props) {
@@ -107,10 +116,128 @@ export default class ConnextView extends Component {
 		});
 
 		console.log("...2...")
-		//await this.startPoller();
-		//this.setState({ loadingConnext: false });
+		await this.startPoller();
+		this.setState({ loadingConnext: false });
 
-  }
+	}
+
+	// ************************************************* //
+	//                    Pollers                        //
+	// ************************************************* //
+
+	async startPoller() {
+		await this.refreshBalances();
+		await this.setDepositLimits();
+		await this.autoDeposit();
+		await this.autoSwap();
+		interval(async (iteration, stop) => {
+			await this.refreshBalances();
+			await this.setDepositLimits();
+			await this.autoDeposit();
+			await this.autoSwap();
+		}, 3000);
+	}
+
+	async refreshBalances() {
+		const { address, balance, channel, ethprovider, swapRate, token } = this.state;
+		const freeEtherBalance = await channel.getFreeBalance();
+		const freeTokenBalance = await channel.getFreeBalance(token.address);
+		balance.onChain.ether = Currency.WEI(await ethprovider.getBalance(address), swapRate);
+		balance.onChain.token = Currency.DEI(await token.balanceOf(address), swapRate);
+		balance.channel.ether = Currency.WEI(freeEtherBalance[this.state.freeBalanceAddress], swapRate);
+		balance.channel.token = Currency.DEI(freeTokenBalance[this.state.freeBalanceAddress], swapRate);
+		this.setState({ balance });
+	}
+
+	async setDepositLimits() {
+		const { swapRate, ethprovider } = this.state;
+		let gasPrice = await ethprovider.getGasPrice();
+		// default multiple is 1.5, leave 2x for safety
+		let totalDepositGasWei = DEPOSIT_ESTIMATED_GAS.mul(toBN(2)).mul(gasPrice);
+		let totalWithdrawalGasWei = WITHDRAW_ESTIMATED_GAS.mul(gasPrice);
+		const minDeposit = Currency.WEI(totalDepositGasWei.add(totalWithdrawalGasWei), swapRate);
+		const maxDeposit = Currency.DEI(CHANNEL_DEPOSIT_MAX, swapRate);
+		this.setState({ maxDeposit, minDeposit });
+	}
+
+	async autoDeposit() {
+		const { balance, channel, minDeposit, maxDeposit, pending, token } = this.state;
+		if (!channel || (pending.type === "deposit" && !pending.complete)) return;
+		if (!(await channel.getChannel()).available) {
+		console.warn(`Channel not available yet.`);
+			return;
+		}
+		const bnBalance = { ether: toBN(balance.onChain.ether), token: toBN(balance.onChain.token) };
+		const minWei = minDeposit.toWEI().floor();
+		const maxWei = maxDeposit.toWEI().floor();
+
+		if (bnBalance.token.gt(Zero)) {
+			const tokenDepositParams = {
+				amount: bnBalance.token.toString(),
+				assetId: token.address.toLowerCase(),
+			};
+			const channelState = await channel.getChannel();
+			console.log(
+			 `Attempting to deposit ${tokenDepositParams.amount} tokens into channel: ${JSON.stringify(
+			   channelState,
+			   null,
+			   2,
+			 )}...`,
+			);
+			this.setPending({ type: "deposit", complete: false, closed: false });
+			const result = await channel.deposit(tokenDepositParams);
+			this.setPending({ type: "deposit", complete: true, closed: false });
+			console.log(`Successfully deposited! Result: ${JSON.stringify(result, null, 2)}`);
+		}
+
+		if (bnBalance.ether.gt(minWei)) {
+			if (bnBalance.ether.gt(maxWei)) {
+				console.log(
+				`Attempting to deposit more than the limit: ` +
+				`${formatEther(bnBalance.ether)} > ${maxDeposit.toETH()}`,
+				);
+				return;
+			}
+			const ethDepositParams = { amount: bnBalance.ether.sub(minWei).toString() };
+			const channelState = await channel.getChannel();
+			console.log(
+			 `Attempting to deposit ${ethDepositParams.amount} wei into channel: ${JSON.stringify(
+			   channelState,
+			   null,
+			   2,
+			 )}...`,
+			);
+			this.setPending({ type: "deposit", complete: false, closed: false });
+			const result = await channel.deposit(ethDepositParams);
+			this.setPending({ type: "deposit", complete: true, closed: false });
+			console.log(`Successfully deposited! Result: ${JSON.stringify(result, null, 2)}`);
+		}
+	}
+
+	async autoSwap() {
+		const { balance, channel, swapRate, token } = this.state;
+		const weiBalance = toBN(balance.channel.ether.toWEI().floor());
+		const tokenBalance = toBN(balance.channel.token.toDEI().floor());
+		if (weiBalance.gt(Zero) && tokenBalance.lte(HUB_EXCHANGE_CEILING)) {
+			console.log(`Attempting to swap ${balance.channel.ether.toETH()} for dai at rate ${swapRate}`);
+			await channel.swap({
+			 amount: weiBalance.toString(),
+			 fromAssetId: AddressZero,
+			 swapRate: parseEther(swapRate).toString(),
+			 toAssetId: token.address,
+			});
+		}
+	}
+
+	setPending(pending) {
+		this.setState({ pending });
+	}
+
+	closeConfirmations() {
+		const { pending } = this.state;
+		this.setState({ pending: { ...pending, closed: true } });
+	}
+
 
 	render() {
 		return <div>ConnextView</div>
