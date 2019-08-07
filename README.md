@@ -1,1 +1,7 @@
-# connext_client_v2
+# Launch
+```
+cd connext-app
+
+npm install
+npm start
+```
