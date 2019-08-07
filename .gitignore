@@ -1,0 +1,12 @@
+# Cache
+
+# Compiled output
+build/
+dist/
+node_modules/
+
+# Logs
+
+# OS
+.bash_history
+.DS_Store
