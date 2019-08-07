@@ -240,6 +240,32 @@ export default class ConnextView extends Component {
 
 
 	render() {
-		return <div>ConnextView</div>
+		const {
+			address,
+			balance,
+			channel,
+			swapRate,
+			maxDeposit,
+			minDeposit,
+			pending,
+			sendScanArgs,
+			xpub,
+		} = this.state;
+
+		const minEth = minDeposit ? minDeposit.toETH().format() : '?.??'
+		const maxEth = maxDeposit ? maxDeposit.toETH().format() : '?.??'
+		const maxDai = maxDeposit ? maxDeposit.toDAI().format() : '?.??'
+
+		var depositTo = `Deposit to address: ${address}`
+		var depositMaxMin = `maxDeposit=${maxEth} minDeposit=${minEth}`
+		var onChannel = `Deposited on Channel: ERC20 = ${balance.channel.token.toDAI()}, ETH = ${ balance.channel.ether.toETH()}`
+		var onChain = `On-Chain: ERC20 = ${balance.onChain.token.toDAI()}, ETH = ${ balance.onChain.ether.toETH()}`
+		return <div>
+			<div>{ onChannel }</div>
+			<div>{ onChain }</div>
+			<br/>
+			<div>{ depositTo }</div>
+			<div>{ depositMaxMin }</div>
+		</div>
 	}
 }
