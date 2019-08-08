@@ -14,8 +14,16 @@ import { formatEther, parseEther } from "ethers/utils"
 
 // Optional URL overrides for custom urls
 const overrides = {
-  nodeUrl: 'wss://rinkeby.indra.connext.network/api/messaging',
-  ethUrl: 'https://rinkeby.indra.connext.network/api/ethprovider',
+	nodeUrl: 'wss://rinkeby.indra.connext.network/api/messaging',
+	ethUrl: 'https://rinkeby.indra.connext.network/api/ethprovider',
+};
+
+const PaymentStates = {
+	None: 0,
+	Collateralizing: 1,
+	CollateralTimeout: 2,
+	OtherError: 3,
+	Success: 4
 };
 
 const styles = theme => ({
@@ -67,12 +75,19 @@ class ConnextView extends Component {
 			swapRate,
 			token: null,
 			xpub: "",
-
+			// WITHDRAW
 			recipient: {
 				display: "",
 				value: undefined,
 				error: undefined,
-			}
+			},
+			// TIPPING
+			tipRecipient: {
+				display: "",
+				value: undefined,
+				error: undefined,
+			},
+			tipAmount: { display: "", error: null, value: null }
 		}
 	}
 
@@ -276,17 +291,21 @@ class ConnextView extends Component {
 		console.log(">> recipient: ", recipient)
 		if (!recipient) return
 
+		console.log(">>>>> toETH().amount: ", balance.channel.ether.toETH().amount)
+		console.log(">>>>> toETH(): ", balance.channel.ether.toETH())
 		const amount = parseEther(balance.channel.ether.toETH().amount)
 		if (amount.lte(Zero)) return
-		console.log(">> amount: ", amount.toString())
+		console.log(">>>>> amount: ", amount.toString())
 
 		this.setPending({ type: "withdrawal", complete: false, closed: false })
 		this.setState({ withdrawing: true });
+
+		//TODO: waiting for Connext message in discord
 		const result = await channel.withdraw({ amount: amount.toString(), recipient });
 		this.setState({ withdrawing: false })
 
 		this.setPending({ type: "withdrawal", complete: true, closed: false })
-		// console.log(`Cashout result: ${JSON.stringify(result)}`)
+		console.log(`Cashout result: ${JSON.stringify(result)}`)
 		//history.push("/")
 	}
 
@@ -294,6 +313,7 @@ class ConnextView extends Component {
 		let recipient = value
 		let error
 
+		//TODO: validate
 		// if (value.includes("ethereum:")) {
 		// 	recipient = value.split(":")[1]
 		// }
@@ -316,6 +336,77 @@ class ConnextView extends Component {
 		});
 	}
 
+	// ************************************************* //
+	//                    TIPPING                        //
+	// ************************************************* //
+	async updateTIPRecipientHandler(rawValue) {
+		const xpubLen = 111
+		let value = null, error = null
+		value = rawValue
+		if (!value.startsWith('xpub')) {
+			error = "Invalid recipient: should start with xpub"
+		}
+		if (!error && value.length !== xpubLen) {
+			error = `Invalid recipient: expected ${xpubLen} characters, got ${value.length}`
+		}
+		this.setState({
+			tipRecipient: {
+				display: rawValue,
+				error,
+				value: error ? null : value,
+			}
+		})
+	}
+
+	async paymentHandler() {
+		console.log(">>> paymentHandler")
+		const { channel } = this.state;
+		const { tipAmount, tipRecipient } = this.state;
+		if (tipAmount.error || tipRecipient.error) return;
+			// TODO: check if recipient needs collateral & tell server to collateralize if more is needed
+		console.log(">>> 1...")
+		try {
+			console.log(">>> 2...")
+			console.log(`Sending ${tipAmount.value} to ${tipRecipient.value}`);
+			//TODO: here is sending does not work waiting for PR of Connext
+			//issue: https://github.com/ConnextProject/indra-v2/issues/241
+			await channel.transfer({
+				assetId: AddressZero, // TODO: token address
+				amount: tipAmount.value.toDEI().floor(),
+				recipient: tipRecipient.value,
+			});
+			this.setState({ showReceipt: true, paymentState: PaymentStates.Success });
+		} catch (e) {
+			console.log(">>> 3...")
+			console.error(`Unexpected error sending payment: ${e.message}`);
+			console.error(e)
+			this.setState({ paymentState: PaymentStates.OtherError, showReceipt: true });
+		}
+	}
+
+	async updateAmountHandler(rawValue) {
+		const { balance } = this.state
+		let value = null, error = null
+		try {
+			value = Currency.DAI(rawValue)
+		} catch (e) {
+			error = e.message
+		}
+		if (value && value.amountWad.gt(balance.channel.ether.toETH().amountWad)) {
+			error = `Invalid amount: must be less than your balance`
+		}
+		if (value && value.amountWad.lte(Zero)) {
+			error = "Invalid amount: must be greater than 0"
+		}
+		this.setState({
+			tipAmount: {
+				display: rawValue,
+				error,
+				value: error ? null : value,
+			}
+		})
+	}
+
 	render() {
 		const { classes } = this.props
 		const {
@@ -329,7 +420,9 @@ class ConnextView extends Component {
 			sendScanArgs,
 			xpub,
 			recipient,
-		} = this.state;
+			tipRecipient,
+			tipAmount,
+		} = this.state
 
 		const minEth = minDeposit ? minDeposit.toETH().format() : '?.??'
 		const maxEth = maxDeposit ? maxDeposit.toETH().format() : '?.??'
@@ -345,28 +438,68 @@ class ConnextView extends Component {
 			<br/>
 			<div>{ depositTo }</div>
 			<div>{ depositMaxMin }</div>
-			<div> withdraw </div>
-			<TextField
-				style={{ width: "100%" }}
-				id="outlined-with-placeholder"
-				label="Address"
-				placeholder="0x0..."
-				value={recipient.display || ""}
-				onChange={evt => this.updateRecipientHandler(evt.target.value)}
-				margin="normal"
-				variant="outlined"
-				required
-				helperText={recipient.error}
-				error={!!recipient.error}
-			/>
-			<Button
-				className={classes.button}
-				fullWidth
-				onClick={() => this.withdrawalHandler(true)}
-				disabled={!recipient.value}
-			>
-			Cash Out Eth
-			</Button>
+			<br/>
+			<div> WITHDRAW:
+				<TextField
+					style={{ width: "100%" }}
+					id="outlined-with-placeholder"
+					label="Address"
+					placeholder="0x0..."
+					value={recipient.display || ""}
+					onChange={evt => this.updateRecipientHandler(evt.target.value)}
+					margin="normal"
+					variant="outlined"
+					required
+					helperText={recipient.error}
+					error={!!recipient.error}
+				/>
+				<Button
+					className={classes.button}
+					fullWidth
+					onClick={() => this.withdrawalHandler(true)}
+					disabled={!recipient.value}
+				>
+				Cash Out Eth
+				</Button>
+			 </div>
+			 <br/>
+			 <div> TIP:
+				<TextField
+					fullWidth
+					id="outlined-number"
+					label="Amount"
+					value={tipAmount.display}
+					type="number"
+					margin="normal"
+					variant="outlined"
+					onChange={evt => this.updateAmountHandler(evt.target.value)}
+					error={tipAmount.error !== null}
+					helperText={tipAmount.error}
+				/>
+ 				<TextField
+ 					style={{ width: "100%" }}
+ 					id="outlined-with-placeholder"
+ 					label="Address"
+ 					placeholder="0x0..."
+ 					value={tipRecipient.display || ""}
+ 					onChange={evt => this.updateTIPRecipientHandler(evt.target.value)}
+ 					margin="normal"
+ 					variant="outlined"
+ 					required
+ 					helperText={tipRecipient.error}
+ 					error={!!tipRecipient.error}
+ 				/>
+				<Button
+					className={classes.button}
+					disabled={!!tipAmount.error || !!tipRecipient.error}
+					fullWidth
+					onClick={() => this.paymentHandler()}
+					size="large"
+					variant="contained"
+					>
+					TIP
+				</Button>
+ 			 </div>
 		</div>
 	}
 }
