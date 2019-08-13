@@ -5,11 +5,12 @@ import { Contract, ethers as eth } from "ethers"
 //import { Currency, store, toBN } from "./utils"
 import { Currency } from './utils/currency'
 import { store } from './utils/store'
-import { toBN } from './utils/bn'
+import { toBN, inverse } from './utils/bn'
 import interval from "interval-promise"; // TODO: don not install and replace to setInterval
 import tokenArtifacts from "openzeppelin-solidity/build/contracts/ERC20Mintable.json"
 import { AddressZero, Zero } from "ethers/constants"
 import { formatEther, parseEther } from "ethers/utils"
+//import { Currency, inverse, store, minBN, toBN, tokenToWei, weiToToken } from "./utils";
 
 
 // Optional URL overrides for custom urls
@@ -62,8 +63,16 @@ class ConnextView extends Component {
 		this.state = {
 			address: "",
 			balance: {
-				channel: { token: Currency.DEI("0", swapRate), ether: Currency.WEI("0", swapRate) },
-				onChain: { token: Currency.DEI("0", swapRate), ether: Currency.WEI("0", swapRate) },
+				channel: {
+					ether: Currency.ETH("0", swapRate),
+					token: Currency.DAI("0", swapRate),
+					total: Currency.ETH("0", swapRate),
+				},
+				onChain: {
+					ether: Currency.ETH("0", swapRate),
+					token: Currency.DAI("0", swapRate),
+					total: Currency.ETH("0", swapRate),
+				},
 			},
 			ethprovider: null,
 			freeBalanceAddress: null,
@@ -92,7 +101,6 @@ class ConnextView extends Component {
 	}
 
 	async componentDidMount() {
-		console.log("...1...")
 		// If no mnemonic, create one and save to local storage
 		let mnemonic = localStorage.getItem("mnemonic");
 		if (!mnemonic) {
@@ -100,7 +108,8 @@ class ConnextView extends Component {
 			localStorage.setItem("mnemonic", mnemonic);
 		}
 
-		const nodeUrl = overrides.nodeUrl || `${window.location.origin.replace(/^http/, "ws")}/api/messaging`;
+		const nodeUrl =
+		overrides.nodeUrl || `${window.location.origin.replace(/^http/, "ws")}/api/messaging`;
 		const ethUrl = overrides.ethUrl || `${window.location.origin}/api/ethprovider`;
 		const ethprovider = new eth.providers.JsonRpcProvider(ethUrl);
 		const cfPath = "m/44'/60'/0'/25446";
@@ -113,10 +122,22 @@ class ConnextView extends Component {
 			nodeUrl,
 			store,
 		});
+
+		const channelAvailable = async () => {
+			const chan = await channel.getChannel();
+			return chan && chan.available;
+		};
+		const interval = 1;
+		while (!(await channelAvailable())) {
+			console.info(`Waiting ${interval} more seconds for channel to be available`);
+			await new Promise(res => setTimeout(() => res(), interval * 1000));
+		}
+
 		const freeBalanceAddress = channel.freeBalanceAddress || channel.myFreeBalanceAddress;
 		const connextConfig = await channel.config();
 		const token = new Contract(connextConfig.contractAddresses.Token, tokenArtifacts.abi, cfWallet);
-		const swapRate = formatEther(await channel.getLatestSwapRate(AddressZero, token.address));
+		const swapRate = await channel.getLatestSwapRate(AddressZero, token.address);
+		const invSwapRate = inverse(swapRate)
 
 		console.log(`Client created successfully!`);
 		console.log(` - Public Identifier: ${channel.publicIdentifier}`);
@@ -124,29 +145,13 @@ class ConnextView extends Component {
 		console.log(` - CF Account address: ${cfWallet.address}`);
 		console.log(` - Free balance address: ${freeBalanceAddress}`);
 		console.log(` - Token address: ${token.address}`);
-		console.log(` - Swap rate: ${swapRate}`)
+		console.log(` - Swap rate: ${swapRate} or ${invSwapRate}`)
 
 		channel.subscribeToSwapRates(AddressZero, token.address, (res) => {
 		if (!res || !res.swapRate) return;
-			console.log(`Got swap rate upate: ${this.state.swapRate} -> ${formatEther(res.swapRate)}`);
-			this.setState({ swapRate: formatEther(res.swapRate) });
+			console.log(`Got swap rate upate: ${this.state.swapRate} -> ${res.swapRate}`);
+			this.setState({ swapRate: res.swapRate });
 		})
-
-		console.log(`Creating a payment profile..`)
-		await channel.addPaymentProfile({
-			amountToCollateralize: parseEther("10").toString(),
-			minimumMaintainedCollateral: parseEther("5").toString(),
-			tokenAddress: token.address,
-		});
-
-		const freeTokenBalance = await channel.getFreeBalance(token.address);
-		const hubFreeBalanceAddress = Object.keys(freeTokenBalance).filter(addr => addr.toLowerCase() !== channel.freeBalanceAddress)[0]
-		if (freeTokenBalance[hubFreeBalanceAddress].eq(Zero)) {
-			console.log(`Requesting collateral for token ${token.address}`)
-			await channel.requestCollateral(token.address);
-		} else {
-			console.log(`Hub has collateralized us with ${formatEther(freeTokenBalance[hubFreeBalanceAddress])} tokens`)
-		}
 
 		this.setState({
 			address: cfWallet.address,
@@ -159,10 +164,8 @@ class ConnextView extends Component {
 			xpub: channel.publicIdentifier,
 		});
 
-		console.log("...2...")
 		await this.startPoller();
 		this.setState({ loadingConnext: false });
-
 	}
 
 	// ************************************************* //
